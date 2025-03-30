@@ -1,6 +1,6 @@
 # SecretBay VPN Configurator
 
-A production-ready console application for automating VPN server configuration on Ubuntu systems.
+A console application for automating VPN server configuration on Ubuntu systems.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Go Version](https://img.shields.io/badge/go-1.23.3-blue.svg)
