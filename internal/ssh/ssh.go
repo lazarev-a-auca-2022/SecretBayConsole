@@ -4,7 +4,6 @@ package ssh
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -120,6 +119,25 @@ func (c *Client) UploadFile(content []byte, remotePath string) error {
 		return fmt.Errorf("client not connected")
 	}
 
+	// Create the directory if needed
+	dirPath := fmt.Sprintf("dirname %s", remotePath)
+	dirSession, err := c.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session for directory creation: %w", err)
+	}
+	dirSession.Run(dirPath)
+	dirSession.Close()
+
+	mkdirSession, err := c.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session for directory creation: %w", err)
+	}
+	mkdirSession.Run(fmt.Sprintf("mkdir -p $(dirname %s)", remotePath))
+	mkdirSession.Close()
+
+	// Use a more reliable method - upload to temp file then move
+	tmpFile := fmt.Sprintf("/tmp/secretbay_upload_%d", time.Now().UnixNano())
+
 	// Create a new session
 	session, err := c.client.NewSession()
 	if err != nil {
@@ -127,19 +145,48 @@ func (c *Client) UploadFile(content []byte, remotePath string) error {
 	}
 	defer session.Close()
 
-	// Set up pipes for file transfer
-	go func() {
-		w, _ := session.StdinPipe()
-		defer w.Close()
+	// Get the stdin pipe
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stdin pipe: %w", err)
+	}
 
-		fmt.Fprintf(w, "C0644 %d %s\n", len(content), remotePath)
-		io.Copy(w, bytes.NewReader(content))
-		fmt.Fprint(w, "\x00")
-	}()
+	// Capture stderr for better error reporting
+	var stderr bytes.Buffer
+	session.Stderr = &stderr
 
-	// Run the scp command
-	if err := session.Run(fmt.Sprintf("scp -t %s", remotePath)); err != nil {
-		return fmt.Errorf("scp failed: %w", err)
+	// Start the SCP command in receive mode
+	if err := session.Start(fmt.Sprintf("cat > %s", tmpFile)); err != nil {
+		return fmt.Errorf("failed to start file upload: %w", err)
+	}
+
+	// Write file content to stdin
+	_, err = stdin.Write(content)
+	if err != nil {
+		return fmt.Errorf("failed to write file content: %w", err)
+	}
+
+	// Close stdin to signal the end of file
+	stdin.Close()
+
+	// Wait for command to complete
+	if err := session.Wait(); err != nil {
+		return fmt.Errorf("file upload failed: %w (stderr: %s)", err, stderr.String())
+	}
+
+	// Move the file to the final destination
+	moveSession, err := c.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session for moving file: %w", err)
+	}
+	defer moveSession.Close()
+
+	var moveStderr bytes.Buffer
+	moveSession.Stderr = &moveStderr
+
+	// Move the file with proper permissions
+	if err := moveSession.Run(fmt.Sprintf("mv %s %s && chmod 644 %s", tmpFile, remotePath, remotePath)); err != nil {
+		return fmt.Errorf("failed to move file: %w (stderr: %s)", err, moveStderr.String())
 	}
 
 	return nil
