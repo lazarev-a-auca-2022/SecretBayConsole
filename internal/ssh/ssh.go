@@ -3,8 +3,8 @@ package ssh
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -114,100 +114,51 @@ func (c *Client) ExecuteCommand(command string) (string, error) {
 	return stdoutBuf.String(), nil
 }
 
-// UploadFile uploads a file to the remote server.
+// UploadFile uploads a file to the remote server using a reliable direct write method
+// instead of SCP which can be problematic in some environments.
 func (c *Client) UploadFile(content []byte, remotePath string) error {
 	if c.client == nil {
 		return fmt.Errorf("client not connected")
 	}
 
-	// Log detailed information about the upload operation
-	log.Printf("Attempting to upload %d bytes to %s", len(content), remotePath)
-
-	// Create the directory if needed
+	// First ensure the parent directory exists
 	dirCmd := fmt.Sprintf("mkdir -p $(dirname %s)", remotePath)
-	log.Printf("Creating directory with command: %s", dirCmd)
-
 	mkdirSession, err := c.client.NewSession()
 	if err != nil {
 		return fmt.Errorf("failed to create session for directory creation: %w", err)
 	}
-
-	var mkdirStderr bytes.Buffer
-	mkdirSession.Stderr = &mkdirStderr
-
 	err = mkdirSession.Run(dirCmd)
+	mkdirSession.Close()
 	if err != nil {
-		log.Printf("Directory creation stderr: %s", mkdirStderr.String())
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
-	mkdirSession.Close()
 
-	// Use a more reliable method - upload to temp file then move
-	tmpFile := fmt.Sprintf("/tmp/secretbay_upload_%d", time.Now().UnixNano())
-	log.Printf("Using temporary file: %s", tmpFile)
+	// Use base64 encoding for reliable transfer
+	encodedContent := base64.StdEncoding.EncodeToString(content)
 
-	// Create a new session
-	session, err := c.client.NewSession()
+	// Write the content using base64 decode to avoid any shell interpretation issues
+	writeCmd := fmt.Sprintf("echo '%s' | base64 -d > %s", encodedContent, remotePath)
+	writeSession, err := c.client.NewSession()
 	if err != nil {
-		return fmt.Errorf("failed to create session: %w", err)
+		return fmt.Errorf("failed to create session for file writing: %w", err)
 	}
-	defer session.Close()
-
-	// Get the stdin pipe
-	stdin, err := session.StdinPipe()
+	err = writeSession.Run(writeCmd)
+	writeSession.Close()
 	if err != nil {
-		return fmt.Errorf("failed to get stdin pipe: %w", err)
-	}
-
-	// Capture stderr for better error reporting
-	var stderr bytes.Buffer
-	session.Stderr = &stderr
-
-	// Start the cat command to write to temp file
-	uploadCmd := fmt.Sprintf("cat > %s", tmpFile)
-	log.Printf("Running upload command: %s", uploadCmd)
-
-	if err := session.Start(uploadCmd); err != nil {
-		return fmt.Errorf("failed to start file upload: %w", err)
-	}
-
-	// Write file content to stdin
-	bytesWritten, err := stdin.Write(content)
-	if err != nil {
-		log.Printf("Write error after %d bytes: %v", bytesWritten, err)
 		return fmt.Errorf("failed to write file content: %w", err)
 	}
-	log.Printf("Wrote %d bytes to stdin", bytesWritten)
 
-	// Close stdin to signal the end of file
-	stdin.Close()
-
-	// Wait for command to complete
-	if err := session.Wait(); err != nil {
-		log.Printf("Upload stderr: %s", stderr.String())
-		return fmt.Errorf("file upload failed: %w (stderr: %s)", err, stderr.String())
-	}
-
-	// Move the file to the final destination
-	moveSession, err := c.client.NewSession()
+	// Set proper permissions
+	chmodSession, err := c.client.NewSession()
 	if err != nil {
-		return fmt.Errorf("failed to create session for moving file: %w", err)
+		return fmt.Errorf("failed to create session for setting permissions: %w", err)
 	}
-	defer moveSession.Close()
-
-	var moveStderr bytes.Buffer
-	moveSession.Stderr = &moveStderr
-
-	// Move the file with proper permissions
-	moveCmd := fmt.Sprintf("mv %s %s && chmod 644 %s", tmpFile, remotePath, remotePath)
-	log.Printf("Running move command: %s", moveCmd)
-
-	if err := moveSession.Run(moveCmd); err != nil {
-		log.Printf("Move stderr: %s", moveStderr.String())
-		return fmt.Errorf("failed to move file: %w (stderr: %s)", err, moveStderr.String())
+	err = chmodSession.Run(fmt.Sprintf("chmod 644 %s", remotePath))
+	chmodSession.Close()
+	if err != nil {
+		return fmt.Errorf("failed to set file permissions: %w", err)
 	}
 
-	log.Printf("Successfully uploaded file to %s", remotePath)
 	return nil
 }
 
