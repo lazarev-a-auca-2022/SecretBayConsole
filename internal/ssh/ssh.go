@@ -3,7 +3,6 @@ package ssh
 
 import (
 	"bytes"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"time"
@@ -114,8 +113,8 @@ func (c *Client) ExecuteCommand(command string) (string, error) {
 	return stdoutBuf.String(), nil
 }
 
-// UploadFile uploads a file to the remote server using a reliable direct write method
-// instead of SCP which can be problematic in some environments.
+// UploadFile uploads a file to the remote server using a robust chunked method
+// that works reliably across different server environments.
 func (c *Client) UploadFile(content []byte, remotePath string) error {
 	if c.client == nil {
 		return fmt.Errorf("client not connected")
@@ -133,25 +132,63 @@ func (c *Client) UploadFile(content []byte, remotePath string) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Use base64 encoding for reliable transfer
-	encodedContent := base64.StdEncoding.EncodeToString(content)
+	// Create a temporary file for the transfer
+	tmpFilePath := fmt.Sprintf("/tmp/secretbay-%d", time.Now().UnixNano())
 
-	// Write the content using base64 decode to avoid any shell interpretation issues
-	writeCmd := fmt.Sprintf("echo '%s' | base64 -d > %s", encodedContent, remotePath)
-	writeSession, err := c.client.NewSession()
+	// Clear any existing temporary file
+	clearSession, err := c.client.NewSession()
 	if err != nil {
-		return fmt.Errorf("failed to create session for file writing: %w", err)
+		return fmt.Errorf("failed to create session for temp file cleanup: %w", err)
 	}
-	err = writeSession.Run(writeCmd)
-	writeSession.Close()
+	clearSession.Run(fmt.Sprintf("rm -f %s", tmpFilePath))
+	clearSession.Close()
+
+	// Split content into smaller chunks to avoid command line size limits
+	const chunkSize = 1024 // 1KB chunks are safe for most systems
+
+	for i := 0; i < len(content); i += chunkSize {
+		end := i + chunkSize
+		if end > len(content) {
+			end = len(content)
+		}
+
+		chunk := content[i:end]
+
+		// Convert chunk to hex representation for reliable transfer
+		hexChunk := ""
+		for _, b := range chunk {
+			hexChunk += fmt.Sprintf("\\x%02x", b)
+		}
+
+		// Append chunk to temporary file using printf with hex escapes
+		appendCmd := fmt.Sprintf("printf '%s' >> %s", hexChunk, tmpFilePath)
+		appendSession, err := c.client.NewSession()
+		if err != nil {
+			return fmt.Errorf("failed to create session for chunk append: %w", err)
+		}
+
+		err = appendSession.Run(appendCmd)
+		appendSession.Close()
+		if err != nil {
+			return fmt.Errorf("failed to append chunk to temp file: %w", err)
+		}
+	}
+
+	// Move temporary file to final destination
+	moveSession, err := c.client.NewSession()
 	if err != nil {
-		return fmt.Errorf("failed to write file content: %w", err)
+		return fmt.Errorf("failed to create session for file move: %w", err)
+	}
+	err = moveSession.Run(fmt.Sprintf("mv %s %s", tmpFilePath, remotePath))
+	moveSession.Close()
+	if err != nil {
+		return fmt.Errorf("failed to move file to destination: %w", err)
 	}
 
 	// Set proper permissions
 	chmodSession, err := c.client.NewSession()
 	if err != nil {
-		return fmt.Errorf("failed to create session for setting permissions: %w", err)
+		return fmt.Errorf("failed to create session for permissions: %w", err)
 	}
 	err = chmodSession.Run(fmt.Sprintf("chmod 644 %s", remotePath))
 	chmodSession.Close()
