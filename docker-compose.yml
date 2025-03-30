@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  secretbay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./output:/app/output
+      - ./logs:/app/logs
+    environment:
+      - LOG_LEVEL=info
+    restart: unless-stopped
+    command:
+      - "--config"
+      - "/app/config/config.json"
+      - "--output"
+      - "/app/output"
+    # Uncomment to map a port if you add an HTTP API in the future
+    # ports:
+    #   - "8080:8080"
+
+  # You can easily scale this service by adding replicas
+  # Example for scaling with multiple instances:
+  secretbay-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./output:/app/output
+      - ./logs:/app/logs
+    environment:
+      - LOG_LEVEL=info
+    restart: unless-stopped
+    deploy:
+      replicas: 3  # Adjust based on your needs
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    command:
+      - "--config"
+      - "/app/config/worker.json"
+      - "--output"
+      - "/app/output"
+
+volumes:
+  output:
+  logs:

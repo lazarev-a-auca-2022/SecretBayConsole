@@ -1,0 +1,7 @@
+{
+  "server_ip": "192.168.1.100",
+  "username": "root",
+  "auth_method": "password",
+  "auth_credential": "REPLACE_WITH_YOUR_PASSWORD",
+  "vpn_type": "openvpn"
+}
